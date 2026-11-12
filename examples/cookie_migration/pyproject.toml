@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "cookie_migration"
+version = "0.1.0"
+description = "Time-limited migration of an auth cookie to a new name, domain and path"
+authors = ["pgjones <philip.graham.jones@googlemail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+quart = "*"
+itsdangerous = "*"
+
+[tool.poetry.dev-dependencies]
+pytest = "*"
+pytest-asyncio = "*"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+pythonpath = ["src"]
+filterwarnings = ["error"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
