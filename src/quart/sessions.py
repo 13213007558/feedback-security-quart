@@ -22,6 +22,19 @@ if TYPE_CHECKING:
     from .app import Quart  # noqa
 
 
+class SessionSaveError(RuntimeError):
+    """Raised when modified session data cannot be persisted.
+
+    This indicates that changes to the session (for example a login
+    or a privilege change) would be silently lost, for example
+    because there is no HTTP response to carry them to the client
+    (an accepted websocket connection). Check
+    :meth:`SessionInterface.can_save_session` before making
+    security-sensitive changes to avoid this error, or register an
+    error handler to process it.
+    """
+
+
 class SessionInterface:
     """Base class for session interfaces.
 
@@ -97,6 +110,27 @@ class SessionInterface:
         save_each = app.config["SESSION_REFRESH_EACH_REQUEST"]
         return save_each and session.permanent
 
+    def can_save_session(self, response: Response | WerkzeugResponse | None) -> bool:
+        """Check if session changes can be persisted via the response.
+
+        This is the capability contract for :meth:`save_session`: it
+        returns True only if a :meth:`save_session` call with the same
+        ``response`` argument can persist session changes. Check this
+        *before* making security-sensitive changes (e.g. login) to the
+        session.
+
+        Arguments:
+            response: The response the session would be saved to, or
+                None if there is no HTTP response available, e.g.
+                after a websocket connection has been accepted.
+
+        Returns:
+            True, as this base class persists sessions independently
+            of the response. Interfaces that require a response (e.g.
+            cookie-based) override this.
+        """
+        return True
+
     async def open_session(
         self, app: Quart, request: BaseRequestWebsocket
     ) -> SessionMixin | None:
@@ -120,6 +154,11 @@ class SessionInterface:
         Arguments:
             response: Can be None if the session is being saved after
                 a websocket connection closes.
+
+        Raises:
+            SessionSaveError: If the session has been modified but the
+                changes cannot be persisted. Use
+                :meth:`can_save_session` to check beforehand.
 
         Returns:
             The modified response, with the session stored.
@@ -188,18 +227,38 @@ class SecureCookieSessionInterface(SessionInterface):
         except BadSignature:
             return self.session_class()
 
+    def can_save_session(self, response: Response | WerkzeugResponse | None) -> bool:
+        """Check if session changes can be persisted via the response.
+
+        A cookie-based session can only be persisted by sending a
+        ``Set-Cookie`` header, so this returns False if there is no
+        response — e.g. after a websocket connection has been
+        accepted. Changes made before the websocket is accepted are
+        persisted via the acceptance response headers instead.
+        """
+        return response is not None
+
     async def save_session(
         self,
         app: Quart,
         session: SessionMixin,
         response: Response | WerkzeugResponse | None,
     ) -> None:
-        """Saves the session to the response in a secure cookie."""
+        """Saves the session to the response in a secure cookie.
+
+        Raises:
+            SessionSaveError: If the session has been modified but the
+                changes cannot be persisted, either because ``response``
+                is None (e.g. an accepted websocket connection) or
+                because no secret key is configured to sign the cookie.
+        """
         if response is None:
             if session.modified:
-                app.logger.exception(
-                    "Secure Cookie Session modified during websocket handling. "
-                    "These modifications will be lost as a cookie cannot be set."
+                raise SessionSaveError(
+                    "The session was modified, but there is no response to "
+                    "save it to (e.g. the websocket connection was already "
+                    "accepted) so the modifications would be lost. Modify "
+                    "the session before accepting the connection instead."
                 )
             return
 
@@ -235,8 +294,15 @@ class SecureCookieSessionInterface(SessionInterface):
         if not self.should_set_cookie(app, session):
             return
 
+        serializer = self.get_signing_serializer(app)
+        if serializer is None:
+            raise SessionSaveError(
+                "Cannot save the session as no secret key is configured to "
+                "sign the cookie. Set the SECRET_KEY config value."
+            )
+
         expires = self.get_expiration_time(app, session)
-        val = self.get_signing_serializer(app).dumps(dict(session))
+        val = serializer.dumps(dict(session))
         response.set_cookie(
             name,
             val,

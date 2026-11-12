@@ -28,6 +28,8 @@ from werkzeug.datastructures import Headers
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from .debug import traceback_response
+from .globals import _cv_app
+from .sessions import SessionSaveError
 from .signals import websocket_received
 from .signals import websocket_sent
 from .typing import ResponseTypes
@@ -327,14 +329,15 @@ class ASGIWebsocketConnection:
         self, send: ASGISendCallable, headers: Headers, subprotocol: str | None
     ) -> None:
         if not self._accepted:
+            spec_version = _convert_version(
+                self.scope.get("asgi", {}).get("spec_version", "2.0")
+            )
+            await self._save_session_on_accept(headers, spec_version)
             message: WebsocketAcceptEvent = {
                 "headers": [],
                 "subprotocol": subprotocol,
                 "type": "websocket.accept",
             }
-            spec_version = _convert_version(
-                self.scope.get("asgi", {}).get("spec_version", "2.0")
-            )
             if spec_version > [2, 0]:
                 message["headers"] = encode_headers(headers)
             elif headers:
@@ -344,6 +347,40 @@ class ASGIWebsocketConnection:
                 )
             self._accepted = True
             await send(message)
+
+    async def _save_session_on_accept(
+        self, headers: Headers, spec_version: list[int]
+    ) -> None:
+        """Persist pending session changes via the accept headers.
+
+        Accepting the connection is the last opportunity to send a
+        Set-Cookie header to the client, so any session changes made
+        before acceptance are saved here. Changes made after
+        acceptance cannot be persisted, see
+        :meth:`~quart.sessions.SessionInterface.can_save_session`.
+        """
+        ctx = _cv_app.get(None)
+        if ctx is None or not ctx.has_websocket:
+            return
+        session_ = ctx.session
+        interface = self.app.session_interface
+        if interface.is_null_session(session_):
+            return
+        if session_.modified and spec_version <= [2, 0]:
+            raise SessionSaveError(
+                "The session was modified before accepting the websocket, "
+                "but the ASGI server cannot send headers with the accept "
+                "message (spec version < 2.1), so the modifications would "
+                "be lost."
+            )
+        if interface.should_set_cookie(self.app, session_):
+            response = self.app.response_class("")
+            await interface.save_session(self.app, session_, response)
+            for value in response.headers.get_all("Set-Cookie"):
+                headers.add("Set-Cookie", value)
+            # The changes so far are now persisted; anything modified
+            # after this point cannot be saved.
+            session_.modified = False
 
     async def close_connection(
         self, send: ASGISendCallable, code: int, reason: str

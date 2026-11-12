@@ -1,3 +1,17 @@
+## Unreleased
+
+- Add a capability contract to the session interface:
+  `SessionInterface.can_save_session` reports whether session changes
+  can be persisted via a given response (or lack thereof, e.g. an
+  accepted websocket connection), so apps can check before making
+  security-sensitive changes.
+- Session changes made before a websocket connection is accepted are
+  now persisted via the accept message headers (ASGI spec >= 2.1).
+- `SecureCookieSessionInterface.save_session` raises `SessionSaveError`
+  when modified session data cannot be persisted (no response, no
+  secret key, or an ASGI server that cannot send accept headers),
+  instead of silently dropping the changes.
+
 ## Version 0.23.1
 
 Released 2026-08-29

@@ -112,6 +112,7 @@ class TestHTTPConnection:
 class TestWebsocketConnection:
     def __init__(self, app: Quart, scope: WebsocketScope) -> None:
         self.accepted = False
+        self.accept_headers: Headers | None = None
         self.app = app
         self.headers: Headers | None = None
         self.response_data = bytearray()
@@ -170,6 +171,7 @@ class TestWebsocketConnection:
     async def _asgi_send(self, message: ASGISendEvent) -> None:
         if message["type"] == "websocket.accept":
             self.accepted = True
+            self.accept_headers = decode_headers(message.get("headers") or [])
         elif message["type"] == "websocket.send":
             await self._receive_queue.put(message.get("bytes") or message.get("text"))
         elif message["type"] == "websocket.http.response.start":

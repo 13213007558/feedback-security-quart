@@ -59,6 +59,29 @@ WebSockets
 
 Sessions can be used with WebSockets with an important caveat about
 cookies. A cookie can only be set on a HTTP response, and an accepted
-WebSocket connection cannot return a HTTP response. Therefore the
-default implementation, being based on cookies, will lose any
-modifications made during an accepted WebSocket connection.
+WebSocket connection cannot return a HTTP response. Therefore any
+modifications made *before* the connection is accepted are persisted
+via the acceptance response headers (ASGI spec version 2.1 or newer),
+whereas modifications made *after* acceptance cannot be persisted.
+
+To check whether a change can be persisted before making it, use the
+:meth:`~quart.sessions.SessionInterface.can_save_session` capability
+contract, passing None as the response once the connection is
+accepted,
+
+.. code-block:: python
+
+    from quart import current_app, session, websocket
+
+    @app.websocket('/ws')
+    async def ws():
+        await websocket.accept()
+        if current_app.session_interface.can_save_session(None):
+            session['colour'] = 'black'
+        else:
+            ...  # changes would be lost, choose another approach
+
+If a modified session cannot be persisted a
+:class:`~quart.sessions.SessionSaveError` is raised (rather than the
+changes being silently lost), which can be handled via an error
+handler in the usual way.

@@ -166,6 +166,9 @@ class TestHTTPConnectionProtocol(Protocol):
 
 
 class TestWebsocketConnectionProtocol(Protocol):
+    accepted: bool
+    accept_headers: Headers | None
+
     def __init__(self, app: Quart, scope: WebsocketScope) -> None: ...
 
     async def __aenter__(self) -> TestWebsocketConnectionProtocol: ...

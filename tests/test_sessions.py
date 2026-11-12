@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from http.cookies import SimpleCookie
 
+import pytest
 from hypercorn.typing import HTTPScope
 from werkzeug.datastructures import Headers
 
 from quart.app import Quart
 from quart.sessions import SecureCookieSession
 from quart.sessions import SecureCookieSessionInterface
+from quart.sessions import SessionInterface
+from quart.sessions import SessionSaveError
 from quart.testing import no_op_push
 from quart.wrappers import Request
 from quart.wrappers import Response
@@ -84,3 +87,42 @@ async def test_secure_cookie_session_interface_save_session_no_access() -> None:
     response = await _save_session(session)
     assert response.headers.get("Set-Cookie") is None
     assert response.headers.get("Vary") is None
+
+
+def test_session_interface_can_save_session_contract() -> None:
+    interface = SessionInterface()
+    assert interface.can_save_session(Response(""))
+    assert interface.can_save_session(None)
+
+    cookie_interface = SecureCookieSessionInterface()
+    assert cookie_interface.can_save_session(Response(""))
+    assert not cookie_interface.can_save_session(None)
+
+
+async def test_secure_cookie_session_interface_save_session_no_response() -> None:
+    session = SecureCookieSession()
+    session["something"] = "else"
+    interface = SecureCookieSessionInterface()
+    app = Quart(__name__)
+    app.secret_key = "secret"
+    with pytest.raises(SessionSaveError):
+        await interface.save_session(app, session, None)
+
+
+async def test_secure_cookie_session_save_session_no_response_unmodified() -> None:
+    session = SecureCookieSession()
+    session["something"] = "else"
+    session.modified = False
+    interface = SecureCookieSessionInterface()
+    app = Quart(__name__)
+    app.secret_key = "secret"
+    await interface.save_session(app, session, None)
+
+
+async def test_secure_cookie_session_interface_save_session_no_secret_key() -> None:
+    session = SecureCookieSession()
+    session["something"] = "else"
+    interface = SecureCookieSessionInterface()
+    app = Quart(__name__)
+    with pytest.raises(SessionSaveError):
+        await interface.save_session(app, session, Response(""))
