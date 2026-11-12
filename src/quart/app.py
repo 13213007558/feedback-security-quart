@@ -97,6 +97,7 @@ from .typing import Event
 from .typing import FilePath
 from .typing import HeadersValue
 from .typing import ResponseReturnValue
+from .typing import RenderScopeChecker
 from .typing import ResponseTypes
 from .typing import ShellContextProcessorCallable
 from .typing import StatusCode
@@ -324,6 +325,14 @@ class Quart(App):
         self.while_serving_gens: list[AsyncGenerator[None]] = []
 
         self.template_context_processors[None] = [_default_template_ctx_processor]
+
+        #: Optional approval hook for renders that use render scoped
+        #: template context values. It is called with the selected
+        #: template and the final context. Returning False raises
+        #: :class:`~quart.render_scope.RenderScopeDeniedError` before the
+        #: template executes. When ``None``, a render that opts in is
+        #: treated as approved by the app.
+        self.render_scope_checker: RenderScopeChecker | None = None
 
         self.cli = AppGroup()
         self.cli.name = self.name

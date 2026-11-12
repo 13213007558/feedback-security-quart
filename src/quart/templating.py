@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from typing import Any
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,8 @@ from .ctx import has_request_context
 from .globals import app_ctx
 from .globals import current_app
 from .helpers import stream_with_context
+from .render_scope import close_render_scope
+from .render_scope import open_render_scope
 from .signals import before_render_template
 from .signals import template_rendered
 
@@ -56,9 +59,12 @@ async def render_template(
         context: The variables to pass to the template.
     """
     ctx = app_ctx._get_current_object()
-    await current_app.update_template_context(ctx, context)
-    template = current_app.jinja_env.get_or_select_template(template_name_or_list)  # type: ignore
-    return await _render(template, context, current_app._get_current_object())
+    app = current_app._get_current_object()
+    await app.update_template_context(ctx, context)
+    template = app.jinja_env.get_or_select_template(  # type: ignore
+        template_name_or_list
+    )
+    return await _render(template, context, app)
 
 
 async def render_template_string(source: str, **context: Any) -> str:
@@ -69,25 +75,36 @@ async def render_template_string(source: str, **context: Any) -> str:
         context: The variables to pass to the template.
     """
     ctx = app_ctx._get_current_object()
-    await current_app.update_template_context(ctx, context)
-    template = current_app.jinja_env.from_string(source)
-    return await _render(template, context, current_app._get_current_object())
+    app = current_app._get_current_object()
+    await app.update_template_context(ctx, context)
+    template = app.jinja_env.from_string(source)
+    return await _render(template, context, app)
 
 
 async def _render(template: Template, context: dict, app: Quart) -> str:
-    await before_render_template.send_async(
-        app,
-        _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
-        template=template,
-        context=context,
+    scope = await open_render_scope(
+        context, template=template, checker=app.render_scope_checker
     )
-    rendered_template = await template.render_async(context)
-    await template_rendered.send_async(
-        app,
-        _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
-        template=template,
-        context=context,
-    )
+    try:
+        with scope.window() if scope is not None else nullcontext():
+            await before_render_template.send_async(
+                app,
+                _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
+                template=template,
+                context=context,
+            )
+            rendered_template = await template.render_async(context)
+            await template_rendered.send_async(
+                app,
+                _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
+                template=template,
+                context=context,
+            )
+    except BaseException as error:
+        await close_render_scope(scope, error)
+        raise
+    else:
+        await close_render_scope(scope)
     return rendered_template
 
 
@@ -116,9 +133,10 @@ async def stream_template(
         context: The variables to make available in the template.
     """
     ctx = app_ctx._get_current_object()
-    await current_app.update_template_context(ctx, context)
-    template = current_app.jinja_env.get_or_select_template(template_name_or_list)
-    return await _stream(current_app._get_current_object(), template, context)
+    app = current_app._get_current_object()
+    await app.update_template_context(ctx, context)
+    template = app.jinja_env.get_or_select_template(template_name_or_list)
+    return await _stream(app, template, context)
 
 
 async def stream_template_string(source: str, **context: Any) -> AsyncIterator[str]:
@@ -132,30 +150,74 @@ async def stream_template_string(source: str, **context: Any) -> AsyncIterator[s
         context: The variables to make available in the template.
     """
     ctx = app_ctx._get_current_object()
-    await current_app.update_template_context(ctx, context)
-    template = current_app.jinja_env.from_string(source)
-    return await _stream(current_app._get_current_object(), template, context)
+    app = current_app._get_current_object()
+    await app.update_template_context(ctx, context)
+    template = app.jinja_env.from_string(source)
+    return await _stream(app, template, context)
 
 
 async def _stream(
     app: Quart, template: Template, context: dict[str, Any]
 ) -> AsyncIterator[str]:
-    await before_render_template.send_async(
-        app,
-        _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
-        template=template,
-        context=context,
+    scope = await open_render_scope(
+        context, template=template, checker=app.render_scope_checker
     )
+    try:
+        with scope.window() if scope is not None else nullcontext():
+            await before_render_template.send_async(
+                app,
+                _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
+                template=template,
+                context=context,
+            )
+    except BaseException as error:
+        await close_render_scope(scope, error)
+        raise
+
+    generator = template.generate_async(context)
+
+    async def fail(error: BaseException) -> None:
+        # Release before the error propagates so release failures are
+        # attached to the template error rather than masking it.
+        try:
+            await generator.aclose()
+        except BaseException as close_error:
+            error.add_note(f"Error closing template stream: {close_error!r}")
+        # A GeneratorExit is the caller deliberately closing the stream;
+        # release failures should surface on their own rather than as
+        # notes on an exception that is about to be discarded.
+        exc_value = None if isinstance(error, GeneratorExit) else error
+        await close_render_scope(scope, exc_value)
 
     async def generate() -> AsyncIterator[str]:
-        async for chunk in template.generate_async(context):
-            yield chunk
-        await template_rendered.send_async(
-            app,
-            _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
-            template=template,
-            context=context,
-        )
+        try:
+            while True:
+                # Async generators share the caller's context, so the
+                # window must close before the chunk is returned to the
+                # caller. Otherwise a captured access object would stay
+                # usable while the stream is paused between chunks.
+                chunk: str | None = None
+                with scope.window() if scope is not None else nullcontext():
+                    try:
+                        chunk = await generator.__anext__()
+                    except StopAsyncIteration:
+                        await template_rendered.send_async(
+                            app,
+                            _sync_wrapper=app.ensure_async,  # type: ignore[arg-type]
+                            template=template,
+                            context=context,
+                        )
+                if chunk is None:
+                    break
+                yield chunk
+        except BaseException as error:
+            await fail(error)
+            raise
+        finally:
+            # Release on normal exhaustion too, and close Jinja's
+            # generator so its own cleanup runs now rather than waiting
+            # for garbage collection. Closing twice is harmless.
+            await close_render_scope(scope)
 
     # If a request context is active, keep it while generating.
     if has_request_context():

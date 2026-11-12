@@ -6,6 +6,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import MutableMapping
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from werkzeug.datastructures import Authorization  # noqa: F401
     from werkzeug.datastructures import Headers  # noqa: F401
     from werkzeug.wrappers import Response as WerkzeugResponse  # noqa: F401
+
+    from jinja2 import Template
 
     from .app import Quart
     from .sessions import SessionMixin
@@ -104,6 +107,10 @@ TemplateContextProcessorCallable = (
 TemplateFilterCallable = Callable[[Any], Any]
 TemplateGlobalCallable = Callable[[Any], Any]
 TemplateTestCallable = Callable[[Any], bool]
+RenderScopeChecker = (
+    Callable[["Template", MutableMapping[str, Any]], bool]
+    | Callable[["Template", MutableMapping[str, Any]], Awaitable[bool]]
+)
 URLDefaultCallable = Callable[[str, dict], None]
 URLValuePreprocessorCallable = Callable[[str | None, dict | None], None]
 WhileServingCallable = Callable[[], AsyncGenerator[None]]

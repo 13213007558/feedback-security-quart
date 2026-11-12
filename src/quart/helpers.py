@@ -229,8 +229,16 @@ def stream_with_context(func: Callable) -> Callable:
     @wraps(func)
     async def generator(*args: Any, **kwargs: Any) -> Any:
         async with ctx:
-            async for data in func(*args, **kwargs):
-                yield data
+            inner = func(*args, **kwargs)
+            try:
+                async for data in inner:
+                    yield data
+            finally:
+                # Closing the wrapped generator here means its cleanup
+                # runs now, rather than waiting for garbage collection.
+                close = getattr(inner, "aclose", None)
+                if close is not None:
+                    await close()
 
     return generator
 

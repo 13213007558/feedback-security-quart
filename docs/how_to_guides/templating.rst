@@ -89,3 +89,50 @@ information to all requests to the app. An example,
     @blueprint.app_context_processor
     async def app_wide():
         return {'context': 'value'}
+
+Render scoped access objects
+----------------------------
+
+If a context processor provides a privileged, read-only data access
+object, it can be made available for exactly one render. Return the
+object wrapped in :func:`~quart.render_scoped` rather than returning it
+directly,
+
+.. code-block:: python
+
+    @app.context_processor
+    async def provide_access():
+        return {"access": render_scoped(account_access)}
+
+The value is replaced in the template context by a read-only proxy. It
+can be read and called during that render only. After the render
+finishes, is closed, or raises, any further attribute access or call on
+the proxy or on a method captured from it raises
+:exc:`~quart.RenderScopeClosedError`. Attempting to write through the
+proxy raises :exc:`~quart.ReadOnlyAccessError`.
+
+Streaming templates follow the same rule. For
+:func:`~quart.stream_template` and
+:func:`~quart.stream_template_string` the scope stays active while the
+stream is iterated, and ends when the stream is exhausted, raises, or is
+closed via ``aclose()``. It is active only while each template step is
+actually executing, so a proxy captured from a paused stream cannot be
+used between chunks. Values can be given an explicit release callable
+and are released in reverse binding order,
+
+.. code-block:: python
+
+    return {"access": render_scoped(account_access, release=close_access)}
+
+To approve a render, set :attr:`~quart.app.Quart.render_scope_checker`
+on the app to a callable (or an async callable) taking the selected
+template and the final context. Returning false makes the render fail
+with :exc:`~quart.RenderScopeDeniedError` before the template executes.
+When no checker is set, a render that uses a scoped value is treated as
+approved. The checker may be async.
+
+This is opt-in. Plain context values, and templates whose context
+processors do not return :func:`~quart.render_scoped` markers, are
+passed to Jinja exactly as before. The proxy is not an identity wrapper;
+access objects should expose their operations as methods, since a
+non-callable value that was already read cannot be revoked.

@@ -30,6 +30,13 @@ from .helpers import send_from_directory as send_from_directory
 from .helpers import stream_with_context as stream_with_context
 from .helpers import url_for as url_for
 from .json import jsonify as jsonify
+from .render_scope import ReadOnlyAccess as ReadOnlyAccess
+from .render_scope import ReadOnlyAccessError as ReadOnlyAccessError
+from .render_scope import RenderScope as RenderScope
+from .render_scope import RenderScopeClosedError as RenderScopeClosedError
+from .render_scope import RenderScopeDeniedError as RenderScopeDeniedError
+from .render_scope import RenderScopeError as RenderScopeError
+from .render_scope import render_scoped as render_scoped
 from .signals import appcontext_popped as appcontext_popped
 from .signals import appcontext_pushed as appcontext_pushed
 from .signals import appcontext_tearing_down as appcontext_tearing_down

@@ -1,3 +1,13 @@
+## Version 0.24.0
+
+Unreleased
+
+- Add opt-in render scopes for template context values. A context
+  processor can mark a privileged read-only access object with
+  ``render_scoped`` so that it is usable only during the render, with
+  streaming templates releasing it on exhaustion, error, or close.
+  Approval is provided by ``Quart.render_scope_checker``.
+
 ## Version 0.23.1
 
 Released 2026-08-29
