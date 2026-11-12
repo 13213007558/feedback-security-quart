@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
+from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
 
@@ -16,7 +18,9 @@ from quart.asgi import _convert_version
 from quart.asgi import _handle_exception
 from quart.asgi import ASGIHTTPConnection
 from quart.asgi import ASGIWebsocketConnection
+from quart.signals import got_serving_exception
 from quart.utils import encode_headers
+from quart.wrappers import Response
 
 
 @pytest.mark.parametrize(
@@ -351,3 +355,136 @@ async def test__handle_exception(debug: bool, testing: bool, raises: bool) -> No
             await _handle_exception(app, ValueError())
     else:
         await _handle_exception(app, ValueError())
+
+
+def _streaming_scope() -> HTTPScope:
+    return {
+        "type": "http",
+        "asgi": {"spec_version": "2.1"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/download",
+        "raw_path": b"/download",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"quart")],
+        "client": ("127.0.0.1", 80),
+        "server": None,
+        "extensions": {},
+        "state": {},  # type: ignore[typeddict-item]
+    }
+
+
+async def test_streaming_failure_after_first_byte_is_reported() -> None:
+    # A generator failure raised after the response started cannot be rewritten
+    # into an error response. The bytes already sent must remain, the original
+    # error must propagate (never a success status), and the serving signal and
+    # error log must record it.
+    app = Quart(__name__)
+    app.testing = False
+    fired: list[BaseException] = []
+
+    def receiver(sender: Any, *, exception: BaseException, **_: Any) -> None:
+        fired.append(exception)
+
+    got_serving_exception.connect(receiver, app)
+
+    async def broken_stream() -> AsyncGenerator[bytes, None]:
+        yield b"first-chunk"
+        raise RuntimeError("body source died")
+
+    @app.get("/download")
+    async def download() -> Response:
+        return app.response_class(broken_stream(), status=200)
+
+    sent: list[ASGISendEvent] = []
+    inbound: asyncio.Queue = asyncio.Queue()
+    inbound.put_nowait({"type": "http.request", "body": b"", "more_body": False})
+    request_consumed = asyncio.Event()
+
+    async def receive() -> ASGIReceiveEvent:
+        # Hand over the request body, then block like a still-connected client
+        # so a sending failure propagates instead of being cancelled by a
+        # disconnect message.
+        if not request_consumed.is_set():
+            message = await inbound.get()
+            request_consumed.set()
+            return message
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def send(message: ASGISendEvent) -> None:
+        sent.append(message)
+
+    connection = ASGIHTTPConnection(app, _streaming_scope())
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        await connection(receive, send)
+
+    leaves = exc_info.value.exceptions
+    assert any(isinstance(exc, RuntimeError) for exc in leaves)
+    assert fired and isinstance(fired[0], RuntimeError)
+    # Status 200 and the first chunk were already committed before the failure.
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 200  # type: ignore[index]
+    assert b"first-chunk" in b"".join(
+        event.get("body", b"")
+        for event in sent
+        if event["type"] == "http.response.body"
+    )
+    # No clean terminal frame is sent for an aborted response.
+    assert not any(
+        event["type"] == "http.response.body" and not event.get("more_body", True)
+        for event in sent
+    )
+    got_serving_exception.disconnect(receiver, app)
+
+
+async def test_streaming_failure_before_first_byte_skips_sending_report() -> None:
+    # A teardown failure raised while the request context exits happens before
+    # the first byte is sent. It must surface unchanged and must NOT be routed
+    # through the post-send reporting path (which only applies once headers are
+    # committed).
+    app = Quart(__name__)
+    app.testing = False
+    reported: list[BaseException] = []
+
+    def receiver(sender: Any, *, exception: BaseException, **_: Any) -> None:
+        reported.append(exception)
+
+    got_serving_exception.connect(receiver, app)
+
+    @app.teardown_request
+    async def fail_teardown(exc: BaseException | None) -> None:
+        raise IOError("cleanup failed")
+
+    @app.get("/download")
+    async def download() -> Response:
+        async def stream() -> AsyncGenerator[bytes, None]:
+            yield b"never-sent"
+
+        return app.response_class(stream(), status=200)
+
+    sent: list[ASGISendEvent] = []
+    inbound: asyncio.Queue = asyncio.Queue()
+    inbound.put_nowait({"type": "http.request", "body": b"", "more_body": False})
+    request_consumed = asyncio.Event()
+
+    async def receive() -> ASGIReceiveEvent:
+        if not request_consumed.is_set():
+            message = await inbound.get()
+            request_consumed.set()
+            return message
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def send(message: ASGISendEvent) -> None:
+        sent.append(message)
+
+    connection = ASGIHTTPConnection(app, _streaming_scope())
+    with pytest.raises(BaseExceptionGroup):
+        await connection(receive, send)
+
+    assert reported == []
+    assert sent == []  # nothing committed: teardown failure is not hidden as 200 OK
+    got_serving_exception.disconnect(receiver, app)

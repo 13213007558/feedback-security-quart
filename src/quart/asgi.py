@@ -28,6 +28,7 @@ from werkzeug.datastructures import Headers
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from .debug import traceback_response
+from .signals import got_serving_exception
 from .signals import websocket_received
 from .signals import websocket_sent
 from .typing import ResponseTypes
@@ -112,38 +113,35 @@ class ASGIHTTPConnection:
         else:
             timeout = self.app.config["RESPONSE_TIMEOUT"]
         try:
-            await asyncio.wait_for(self._send_response(send, response), timeout=timeout)
+            await asyncio.wait_for(
+                self._send_response(request, send, response), timeout=timeout
+            )
         except TimeoutError:
             pass
 
     async def _send_response(
-        self, send: ASGISendCallable, response: ResponseTypes
+        self,
+        request: Request,
+        send: ASGISendCallable,
+        response: ResponseTypes,
     ) -> None:
         if self._disconnected:
             raise ClientDisconnectedError()
-        await send(
-            cast(
-                HTTPResponseStartEvent,
-                {
-                    "type": "http.response.start",
-                    "status": response.status_code,
-                    "headers": encode_headers(response.headers),
-                },
-            )
-        )
 
-        if isinstance(response, WerkzeugResponse):
-            for data in response.response:
-                body = data.encode() if isinstance(data, str) else data
-                await send(
-                    cast(
-                        HTTPResponseBodyEvent,
-                        {"type": "http.response.body", "body": body, "more_body": True},
-                    )
+        try:
+            await send(
+                cast(
+                    HTTPResponseStartEvent,
+                    {
+                        "type": "http.response.start",
+                        "status": response.status_code,
+                        "headers": encode_headers(response.headers),
+                    },
                 )
-        else:
-            async with response.response as response_body:
-                async for data in response_body:
+            )
+
+            if isinstance(response, WerkzeugResponse):
+                for data in response.response:
                     body = data.encode() if isinstance(data, str) else data
                     await send(
                         cast(
@@ -155,12 +153,36 @@ class ASGIHTTPConnection:
                             },
                         )
                     )
-        await send(
-            cast(
-                HTTPResponseBodyEvent,
-                {"type": "http.response.body", "body": b"", "more_body": False},
+            else:
+                async with response.response as response_body:
+                    async for data in response_body:
+                        body = data.encode() if isinstance(data, str) else data
+                        await send(
+                            cast(
+                                HTTPResponseBodyEvent,
+                                {
+                                    "type": "http.response.body",
+                                    "body": body,
+                                    "more_body": True,
+                                },
+                            )
+                        )
+            await send(
+                cast(
+                    HTTPResponseBodyEvent,
+                    {"type": "http.response.body", "body": b"", "more_body": False},
+                )
             )
-        )
+        except ClientDisconnectedError:
+            raise
+        except Exception as error:
+            # Headers (and possibly body bytes) are already committed, so the
+            # status cannot be rewritten and an error-handler response cannot
+            # be started. Record the failure through the serving error path and
+            # abort the response; the original exception is preserved, never
+            # swapped for a success status.
+            await _report_sending_exception(self.app, request, error)
+            raise
 
     async def _send_push_promise(
         self, send: ASGISendCallable, path: str, headers: Headers
@@ -417,6 +439,34 @@ async def _handle_exception(app: Quart, error: Exception) -> Response:
         return await traceback_response(error)
     else:
         raise error
+
+
+async def _report_sending_exception(
+    app: Quart, request: Request, error: Exception
+) -> None:
+    """Report a failure raised while a response is already being sent.
+
+    At this point the response status and headers are committed, possibly with
+    body bytes already on the wire, so the failure cannot be turned into an
+    error-handler response. Log it and emit the existing serving-exception
+    signal instead; the original exception is re-raised by the caller so that a
+    cleanup failure is never presented as a successful, authorized response.
+    """
+    app.logger.error(
+        "Exception while sending response to %s %s",
+        request.method,
+        request.path,
+        exc_info=error,
+    )
+    try:
+        await got_serving_exception.send_async(
+            app,
+            _sync_wrapper=app.ensure_async,
+            exception=error,
+        )
+    except Exception:
+        # A receiver failure must not mask the response error being reported.
+        app.logger.exception("Error handling got_serving_exception signal")
 
 
 def _normalise_path(path: str, root_path: str) -> str:
