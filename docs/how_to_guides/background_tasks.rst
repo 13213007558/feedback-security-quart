@@ -41,6 +41,47 @@ any server shutdown timeout.
 Synchronous background tasks are supported and will run in a separate
 thread.
 
+Per-account authorization quotas
+---------------------------------
+
+A background task can be made to borrow an account's authorization
+resource (for example a signing service used when sending email
+notifications) via a :class:`~quart.QuotaService`. Attach the service
+to the app and pass ``account_id`` when scheduling the task:
+
+.. code-block:: python
+
+    from quart import QuotaService, Quart
+
+    app = Quart(__name__)
+    # Account "a" may hold two leases at once, account "b" one.
+    QuotaService({"a": 2, "b": 1}, app=app)
+
+    @app.route('/notify/<account_id>')
+    async def notify(account_id):
+        app.add_background_task(send_email, account_id=account_id)
+        return 'Accepted'
+
+The rules are:
+
+- A task only takes the account's permission when it actually starts
+  running, not when it is scheduled. Tasks that exceed the account
+  limit wait in a FIFO queue until a slot frees.
+- Each account is limited independently, so a busy account never blocks
+  the others.
+- The permission is always released when the task finishes, raises, or
+  is cancelled, so the in-use count cannot leak.
+- Once the app starts shutting down the quota service closes: new
+  tasks are rejected with :class:`~quart.ServiceClosedError`, and tasks
+  still waiting for a slot are revoked. Tasks already running keep
+  their lease and are awaited as usual.
+- An admitted task belongs to the application, not to the request that
+  scheduled it. Cancelling or disconnecting that request does not
+  cancel the task.
+
+Tasks scheduled without an ``account_id`` (or while no
+``QuotaService`` is attached) run unconstrained as before.
+
 .. warning::
 
     As Quart is based on asyncio it will run on a single execution and

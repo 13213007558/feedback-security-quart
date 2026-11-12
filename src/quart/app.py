@@ -62,6 +62,9 @@ from .helpers import _CollectErrors
 from .helpers import get_debug_flag
 from .helpers import get_flashed_messages
 from .helpers import send_from_directory
+from .quotas import QuotaLease
+from .quotas import QuotaService
+from .quotas import ServiceClosedError
 from .routing import QuartMap
 from .routing import QuartRule
 from .sessions import SecureCookieSessionInterface
@@ -195,6 +198,7 @@ class Quart(App):
     asgi_http_class: type[ASGIHTTPProtocol]
     asgi_lifespan_class: type[ASGILifespanProtocol]
     asgi_websocket_class: type[ASGIWebsocketProtocol]
+    quota_service: QuotaService | None
     shutdown_event: Event
     test_app_class: type[TestAppProtocol]
     test_client_class: type[TestClientProtocol]  # type: ignore[assignment]
@@ -314,6 +318,9 @@ class Quart(App):
             AppOrBlueprintKey, list[AfterWebsocketCallable]
         ] = defaultdict(list)
         self.background_tasks: set[asyncio.Task] = set()
+        # Optional per-account authorization quotas used to gate
+        # background tasks. None leaves add_background_task unconstrained.
+        self.quota_service: QuotaService | None = None
         self.before_serving_funcs: list[Callable[[], Awaitable[None]]] = []
         self.before_websocket_funcs: dict[
             AppOrBlueprintKey, list[BeforeWebsocketCallable]
@@ -1375,13 +1382,60 @@ class Quart(App):
         request.body.set_result(request_body)
         return self.request_context(request)
 
-    def add_background_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:
+    def add_background_task(
+        self,
+        func: Callable,
+        *args: Any,
+        account_id: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Schedule ``func`` as a background task.
+
+        If ``account_id`` is given and a :class:`~quart.quotas.QuotaService`
+        is attached to the app, the task waits for that account's
+        authorization quota before it runs. The quota permission is only
+        taken when the task actually starts executing, and it is released
+        as soon as the task finishes, fails or is cancelled - the in-use
+        counter never leaks.
+
+        Admission rule: the task is only admitted while the quota service
+        is open. Once shutdown begins (the service is closed), new tasks
+        are rejected with :class:`~quart.quotas.ServiceClosedError`. An
+        admitted task belongs to the application rather than to the
+        request that scheduled it: cancelling or disconnecting the
+        request does not cancel the task, and a task still waiting for a
+        slot is simply revoked if shutdown happens before its turn.
+
+        Without an ``account_id`` (or without a quota service) the task
+        runs unconstrained, matching the previous behaviour.
+        """
+        quota_service = self.quota_service
+        if (
+            account_id is not None
+            and quota_service is not None
+            and quota_service.closed
+        ):
+            raise ServiceClosedError(
+                "Cannot accept background tasks: the quota service is closed"
+            )
+
         async def _wrapper() -> None:
             async with self.app_context() as ctx:
+                lease: QuotaLease | None = None
                 try:
+                    if account_id is not None and quota_service is not None:
+                        lease = await quota_service.acquire(account_id)
                     await self.ensure_async(func)(*args, **kwargs)
+                except ServiceClosedError:
+                    # The task was waiting for an account slot when the
+                    # service closed. This is an expected shutdown outcome
+                    # rather than a failure of the task itself.
+                    return
                 except Exception as error:
                     await self.handle_background_exception(ctx, error)
+                finally:
+                    if lease is not None:
+                        await lease.release()
 
         task = asyncio.get_event_loop().create_task(_wrapper())
         self.background_tasks.add(task)
@@ -1781,6 +1835,11 @@ class Quart(App):
 
     async def shutdown(self) -> None:
         self.shutdown_event.set()
+        # Stop admitting new tasks and revoke any task that is still
+        # waiting for an account quota. Tasks already holding a lease
+        # keep running and are awaited below.
+        if self.quota_service is not None:
+            self.quota_service.close()
         try:
             await asyncio.wait_for(
                 asyncio.gather(*self.background_tasks),

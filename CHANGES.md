@@ -1,3 +1,13 @@
+## Unreleased
+
+- Add a per-account authorization quota service for background
+  tasks. ``Quart.add_background_task`` accepts an ``account_id`` and,
+  when a ``QuotaService`` is attached, the task only takes the
+  account's permission once it starts running, waits FIFO when the
+  account limit is reached, and always releases the permission on
+  completion, error or cancellation. Closing the service during
+  shutdown rejects new tasks and revokes waiting tasks.
+
 ## Version 0.23.1
 
 Released 2026-08-29
