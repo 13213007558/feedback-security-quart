@@ -11,6 +11,7 @@ How to guides
    command_line.rst
    configuration.rst
    developing.rst
+   delivery_audit.rst
    disconnections.rst
    event_loop.rst
    flask_extensions.rst
