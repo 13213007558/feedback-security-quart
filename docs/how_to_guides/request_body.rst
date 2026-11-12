@@ -55,6 +55,14 @@ provides methods to iterate over the body,
     Iterating over the body consumes the data, so any further usage of
     the data is not possible unless it is saved during the iteration.
 
+File uploads
+------------
+
+When accepting ``multipart/form-data`` uploads that mix ordinary
+attachments with sensitive material, see
+:ref:`file_upload_admission` for how to gate which parts are staged to
+disk and how to cap the bytes spooled per data category.
+
 Testing
 -------
 

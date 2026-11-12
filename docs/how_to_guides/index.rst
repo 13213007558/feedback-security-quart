@@ -13,6 +13,7 @@ How to guides
    developing.rst
    disconnections.rst
    event_loop.rst
+   file_upload_admission.rst
    flask_extensions.rst
    flask_migration.rst
    json_encoding.rst

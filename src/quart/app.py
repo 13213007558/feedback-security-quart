@@ -231,6 +231,9 @@ class Quart(App):
             "MAX_COOKIE_SIZE": 4093,
             "MAX_FORM_MEMORY_SIZE": 500_000,
             "MAX_FORM_PARTS": 1_000,
+            # Per-category cap (bytes) on multipart file parts that are
+            # spooled to a temporary file. None means unlimited.
+            "FORM_SPOOL_QUOTA": None,
             "PERMANENT_SESSION_LIFETIME": timedelta(days=31),
             # Replaces PREFERRED_URL_SCHEME to allow for WebSocket scheme
             "PREFER_SECURE_URLS": False,

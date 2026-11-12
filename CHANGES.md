@@ -1,3 +1,11 @@
+## Unreleased
+
+- Add a pluggable field admission policy (`FieldAdmissionPolicy`) and
+  per-category `FORM_SPOOL_QUOTA` for multipart uploads. The policy
+  decides how each file part is staged before any bytes are written to a
+  temporary file; refused parts are never spooled and admitted streams
+  are closed deterministically on any failure.
+
 ## Version 0.23.1
 
 Released 2026-08-29

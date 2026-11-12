@@ -21,6 +21,7 @@ from werkzeug.exceptions import RequestTimeout
 from ..datastructures import FileStorage
 from ..formparser import FormDataParser
 from ..globals import current_app
+from ..staging import FieldAdmissionPolicy
 from .base import BaseRequestWebsocket
 from .base import ClientDisconnectedError
 
@@ -151,9 +152,11 @@ class Request(BaseRequestWebsocket):
     body_class = Body
     form_data_parser_class = FormDataParser
     lock_class = asyncio.Lock
+    field_admission_policy: FieldAdmissionPolicy | None = None
     _max_content_length: int | None = None
     _max_form_memory_size: int | None = None
     _max_form_parts: int | None = None
+    _spool_quota: dict[str, int] | None = None
 
     def __init__(
         self,
@@ -243,6 +246,20 @@ class Request(BaseRequestWebsocket):
     @max_form_parts.setter
     def max_form_parts(self, value: int | None) -> None:
         self._max_form_parts = value
+
+    @property
+    def spool_quota(self) -> dict[str, int] | None:
+        if self._spool_quota is not None:
+            return self._spool_quota
+
+        if current_app:
+            return current_app.config["FORM_SPOOL_QUOTA"]
+
+        return None
+
+    @spool_quota.setter
+    def spool_quota(self, value: dict[str, int] | None) -> None:
+        self._spool_quota = value
 
     @property
     async def stream(self) -> NoReturn:
@@ -342,6 +359,8 @@ class Request(BaseRequestWebsocket):
             max_form_memory_size=self.max_form_memory_size,
             max_form_parts=self.max_form_parts,
             cls=self.parameter_storage_class,
+            field_admission_policy=self.field_admission_policy,
+            spool_quota=self.spool_quota,
         )
 
     async def _load_form_data(self) -> None:

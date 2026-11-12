@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
-from typing import cast
 from typing import IO
 from typing import NoReturn
 from typing import TYPE_CHECKING
@@ -22,6 +21,12 @@ from werkzeug.sansio.multipart import MultipartDecoder
 from werkzeug.sansio.multipart import NeedData
 
 from .datastructures import FileStorage
+from .staging import AdmissionContext
+from .staging import AllowAllAdmissionPolicy
+from .staging import FieldAdmissionPolicy
+from .staging import resolve_decision
+from .staging import SpoolRegistry
+from .staging import StagingDecision
 
 if TYPE_CHECKING:
     from .wrappers.request import Body
@@ -49,6 +54,8 @@ class FormDataParser:
         max_form_parts: int | None = None,
         silent: bool = True,
         stream_factory: StreamFactory = default_stream_factory,
+        field_admission_policy: FieldAdmissionPolicy | None = None,
+        spool_quota: dict[str, int] | None = None,
     ) -> None:
         self.cls = cls
         self.max_content_length = max_content_length
@@ -56,6 +63,12 @@ class FormDataParser:
         self.max_form_parts = max_form_parts
         self.silent = silent
         self.stream_factory = stream_factory
+        self.field_admission_policy = (
+            field_admission_policy
+            if field_admission_policy is not None
+            else AllowAllAdmissionPolicy()
+        )
+        self.spool_quota = spool_quota
 
     def get_parse_func(
         self, mimetype: str, options: dict[str, str]
@@ -97,6 +110,8 @@ class FormDataParser:
             max_form_memory_size=self.max_form_memory_size,
             max_form_parts=self.max_form_parts,
             stream_factory=self.stream_factory,
+            field_admission_policy=self.field_admission_policy,
+            spool_quota=self.spool_quota,
         )
         boundary = options.get("boundary", "").encode("ascii")
 
@@ -136,6 +151,8 @@ class MultiPartParser:
         max_form_memory_size: int | None = None,
         max_form_parts: int | None = None,
         stream_factory: StreamFactory = default_stream_factory,
+        field_admission_policy: FieldAdmissionPolicy | None = None,
+        spool_quota: dict[str, int] | None = None,
     ) -> None:
         self.buffer_size = buffer_size
         self.cls = cls
@@ -144,6 +161,12 @@ class MultiPartParser:
         self.max_form_memory_size = max_form_memory_size
         self.max_form_parts = max_form_parts
         self.stream_factory = stream_factory
+        self.field_admission_policy = (
+            field_admission_policy
+            if field_admission_policy is not None
+            else AllowAllAdmissionPolicy()
+        )
+        self.spool_quota = spool_quota
 
     def fail(self, message: str) -> NoReturn:
         raise ValueError(message)
@@ -162,21 +185,22 @@ class MultiPartParser:
 
         return "utf-8"
 
-    def start_file_streaming(self, event: File, total_content_length: int) -> IO[bytes]:
-        content_type = event.headers.get("content-type")
-
+    def _declared_content_length(self, event: File) -> int | None:
         try:
-            content_length = int(event.headers["content-length"])
+            return int(event.headers["content-length"])
         except (KeyError, ValueError):
-            content_length = 0
+            return None
 
-        container = self.stream_factory(
-            total_content_length,
+    def start_file_streaming(
+        self, event: File, registry: SpoolRegistry, decision: StagingDecision
+    ) -> IO[bytes]:
+        content_type = event.headers.get("content-type")
+        return registry.open(
+            decision.category,
             content_type,
             event.filename,
-            content_length,
+            self._declared_content_length(event),
         )
-        return container
 
     async def parse(
         self, body: Body, boundary: bytes, content_length: int
@@ -188,53 +212,97 @@ class MultiPartParser:
             boundary, self.max_content_length, max_parts=self.max_form_parts
         )
 
-        fields = []
-        files = []
+        registry = SpoolRegistry(
+            self.stream_factory,
+            self.spool_quota,
+            total_content_length=content_length,
+        )
+        fields: list[tuple[str, str]] = []
+        files: list[tuple[str, FileStorage]] = []
 
         current_part: Field | File
+        current_stream: IO[bytes] | None = None
         field_size: int | None = None
-        async for data in body:
-            parser.receive_data(data)
-            event = parser.next_event()
-            while not isinstance(event, (Epilogue, NeedData)):
-                if isinstance(event, Field):
-                    current_part = event
-                    field_size = 0
-                    container = []
-                    _write = container.append
-                elif isinstance(event, File):
-                    current_part = event
-                    field_size = None
-                    container = self.start_file_streaming(event, content_length)
-                    _write = container.write
-                elif isinstance(event, Data):
-                    if self.max_form_memory_size is not None and field_size is not None:
-                        field_size += len(event.data)
-                        if field_size > self.max_form_memory_size:
-                            raise RequestEntityTooLarge()
-
-                    _write(event.data)
-                    if not event.more_data:
-                        if isinstance(current_part, Field):
-                            value = b"".join(container).decode(
-                                self.get_part_charset(current_part.headers), "replace"
-                            )
-                            fields.append((current_part.name, value))
-                        else:
-                            container = cast(IO[bytes], container)
-                            container.seek(0)
-                            files.append(
-                                (
-                                    current_part.name,
-                                    self.file_storage_cls(
-                                        container,
-                                        current_part.filename,
-                                        current_part.name,
-                                        headers=current_part.headers,
-                                    ),
-                                )
-                            )
-
+        try:
+            async for data in body:
+                parser.receive_data(data)
                 event = parser.next_event()
+                while not isinstance(event, (Epilogue, NeedData)):
+                    if isinstance(event, Field):
+                        current_part = event
+                        current_stream = None
+                        field_size = 0
+                        container: IO[bytes] | list[bytes] = []
+                        _write = container.append
+                    elif isinstance(event, File):
+                        current_part = event
+                        field_size = None
+                        current_stream = None
+                        decision = await resolve_decision(
+                            self.field_admission_policy,
+                            AdmissionContext(
+                                name=event.name,
+                                filename=event.filename,
+                                headers=event.headers,
+                                parsed_fields=self.cls(fields),
+                                content_length=self._declared_content_length(event),
+                            ),
+                        )
+                        if decision.spool:
+                            # The stream is only opened once the part has been
+                            # admitted, so a refused part never reaches disk.
+                            current_stream = self.start_file_streaming(
+                                event, registry, decision
+                            )
+                    elif isinstance(event, Data):
+                        if (
+                            self.max_form_memory_size is not None
+                            and field_size is not None
+                        ):
+                            field_size += len(event.data)
+                            if field_size > self.max_form_memory_size:
+                                raise RequestEntityTooLarge()
 
+                        if current_stream is not None:
+                            # Quota is enforced inside the registry before the
+                            # bytes are written.
+                            registry.write(current_stream, event.data)
+                        elif isinstance(current_part, Field):
+                            _write(event.data)
+                        # A refused File part has no stream: its bytes are read
+                        # to advance the parser and then dropped without storage.
+
+                        if not event.more_data:
+                            if isinstance(current_part, Field):
+                                charset = self.get_part_charset(
+                                    current_part.headers
+                                )
+                                value = b"".join(container).decode(
+                                    charset, "replace"
+                                )
+                                fields.append((current_part.name, value))
+                            elif current_stream is not None:
+                                current_stream.seek(0)
+                                files.append(
+                                    (
+                                        current_part.name,
+                                        self.file_storage_cls(
+                                            current_stream,
+                                            current_part.filename,
+                                            current_part.name,
+                                            headers=current_part.headers,
+                                        ),
+                                    )
+                                )
+
+                    event = parser.next_event()
+        except BaseException:
+            # Any failure (admission refusal, quota, malformed body, client
+            # disconnect) must not leave admitted data behind. Streams handed
+            # to file storages are still owned by the registry until success.
+            registry.close_all()
+            raise
+
+        # Success: the open streams now back the returned FileStorage objects.
+        registry.detach_all()
         return self.cls(fields), self.cls(files)
