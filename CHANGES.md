@@ -1,3 +1,13 @@
+## Unreleased
+
+- Add `SessionInterface.get_verification_source` to report whether the
+  session cookie was verified by the current or a fallback secret key
+  (without exposing cookie content), and `should_resign` so apps can
+  decide whether fallback-verified sessions are re-signed with the
+  current key. Re-signing only happens when the response can actually
+  carry a Set-Cookie header, and unverifiable sessions are never
+  re-signed.
+
 ## Version 0.23.1
 
 Released 2026-08-29

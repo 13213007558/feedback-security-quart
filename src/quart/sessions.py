@@ -97,6 +97,27 @@ class SessionInterface:
         save_each = app.config["SESSION_REFRESH_EACH_REQUEST"]
         return save_each and session.permanent
 
+    def get_verification_source(self, session: SessionMixin) -> str | None:
+        """Return which key verified the session cookie, if any.
+
+        This returns "current" if the app's current secret key
+        verified the cookie, "fallback" if a ``SECRET_KEY_FALLBACKS``
+        key did, and None if no valid cookie was presented. It never
+        includes the cookie content nor any key material, so it is
+        safe to log or use for migration metrics.
+        """
+        return getattr(session, "verification_source", None)
+
+    def should_resign(self, app: Quart, session: SessionMixin) -> bool:
+        """Return True to re-sign the session with the current key.
+
+        This is only consulted when the session would not otherwise
+        set a cookie and the response can actually carry a Set-Cookie
+        header (i.e. not on accepted websocket connections). Override
+        this to implement an app-specific key migration policy.
+        """
+        return False
+
     async def open_session(
         self, app: Quart, request: BaseRequestWebsocket
     ) -> SessionMixin | None:
@@ -155,16 +176,62 @@ class SecureCookieSessionInterface(SessionInterface):
             keys.extend(fallbacks)
 
         keys.append(app.secret_key)  # itsdangerous expects current key at top
-        options = {
-            "key_derivation": self.key_derivation,
-            "digest_method": self.digest_method,
-        }
         return URLSafeTimedSerializer(
             keys,  # type: ignore[arg-type]
             salt=self.salt,
             serializer=self.serializer,
-            signer_kwargs=options,
+            signer_kwargs=self._signer_kwargs(),
         )
+
+    def should_resign(self, app: Quart, session: SessionMixin) -> bool:
+        """Return True to re-sign fallback verified sessions.
+
+        The default migrates clients by re-signing any session that
+        was verified by a ``SECRET_KEY_FALLBACKS`` key with the
+        current key. Sessions that could not be verified (for example
+        after a fallback key is retired) are never re-signed.
+        """
+        return self.get_verification_source(session) == "fallback"
+
+    def _signer_kwargs(self) -> dict:
+        return {
+            "key_derivation": self.key_derivation,
+            "digest_method": self.digest_method,
+        }
+
+    def _get_verification_serializers(
+        self, app: Quart
+    ) -> list[tuple[str, URLSafeTimedSerializer]]:
+        """Return (source, serializer) pairs to verify cookies with.
+
+        The current key is tried first, then each fallback key, with
+        the source identifying which key verified without exposing
+        the key itself.
+        """
+        serializers = [
+            (
+                "current",
+                URLSafeTimedSerializer(
+                    app.secret_key,
+                    salt=self.salt,
+                    serializer=self.serializer,
+                    signer_kwargs=self._signer_kwargs(),
+                ),
+            )
+        ]
+        for key in app.config["SECRET_KEY_FALLBACKS"] or []:
+            serializers.append(
+                (
+                    "fallback",
+                    URLSafeTimedSerializer(
+                        key,
+                        salt=self.salt,
+                        serializer=self.serializer,
+                        signer_kwargs=self._signer_kwargs(),
+                    ),
+                )
+            )
+        return serializers
 
     async def open_session(
         self, app: Quart, request: BaseRequestWebsocket
@@ -174,19 +241,22 @@ class SecureCookieSessionInterface(SessionInterface):
         This will return None if a signing serializer is not available,
         usually if the config SECRET_KEY is not set.
         """
-        signer = self.get_signing_serializer(app)
-        if signer is None:
+        if self.get_signing_serializer(app) is None:
             return None
 
         cookie = request.cookies.get(self.get_cookie_name(app))
         if cookie is None:
             return self.session_class()
         max_age = int(app.permanent_session_lifetime.total_seconds())
-        try:
-            data = signer.loads(cookie, max_age=max_age)
-            return self.session_class(data)
-        except BadSignature:
-            return self.session_class()
+        for source, serializer in self._get_verification_serializers(app):
+            try:
+                data = serializer.loads(cookie, max_age=max_age)
+            except BadSignature:
+                continue
+            session = self.session_class(data)
+            setattr(session, "verification_source", source)
+            return session
+        return self.session_class()
 
     async def save_session(
         self,
@@ -232,7 +302,9 @@ class SecureCookieSessionInterface(SessionInterface):
 
             return
 
-        if not self.should_set_cookie(app, session):
+        if not self.should_set_cookie(app, session) and not self.should_resign(
+            app, session
+        ):
             return
 
         expires = self.get_expiration_time(app, session)
