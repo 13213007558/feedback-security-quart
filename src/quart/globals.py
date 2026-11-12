@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .app import Quart
     from .ctx import _AppCtxGlobals
     from .ctx import AppContext
+    from .ctx import ContextState
     from .sessions import SessionMixin
     from .wrappers import Request
     from .wrappers import Websocket
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     class AppContextProxy(ProxyMixin[AppContext], AppContext): ...
 
     class _AppCtxGlobalsProxy(ProxyMixin[_AppCtxGlobals], _AppCtxGlobals): ...
+
+    class ContextStateProxy(ProxyMixin[ContextState], ContextState): ...
 
     class RequestProxy(ProxyMixin[Request], Request): ...
 
@@ -45,6 +48,9 @@ current_app: QuartProxy = LocalProxy(  # type: ignore[assignment]
 )
 g: _AppCtxGlobalsProxy = LocalProxy(  # type: ignore[assignment]
     _cv_app, "g", unbound_message=_no_app_msg
+)
+auth_state: ContextStateProxy = LocalProxy(  # type: ignore[assignment]
+    _cv_app, "state", unbound_message=_no_app_msg
 )
 
 request: RequestProxy = LocalProxy(  # type: ignore[assignment]

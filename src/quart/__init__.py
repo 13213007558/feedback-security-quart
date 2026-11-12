@@ -7,12 +7,14 @@ from .app import Quart as Quart
 from .blueprints import Blueprint as Blueprint
 from .config import Config as Config
 from .ctx import after_this_request as after_this_request
+from .ctx import ContextState as ContextState
 from .ctx import copy_current_app_context as copy_current_app_context
 from .ctx import copy_current_request_context as copy_current_request_context
 from .ctx import copy_current_websocket_context as copy_current_websocket_context
 from .ctx import has_app_context as has_app_context
 from .ctx import has_request_context as has_request_context
 from .ctx import has_websocket_context as has_websocket_context
+from .globals import auth_state as auth_state
 from .globals import current_app as current_app
 from .globals import g as g
 from .globals import request as request

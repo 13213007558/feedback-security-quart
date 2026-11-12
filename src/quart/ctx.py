@@ -26,6 +26,84 @@ if TYPE_CHECKING:
     from .app import Quart  # noqa
 
 
+class ContextState:
+    """Short-lived state bound to the lifetime of a context.
+
+    This is a place to store results that must not outlive the
+    request, such as authorization decisions made in a
+    ``before_request`` function::
+
+        @app.before_request
+        def authenticate() -> None:
+            auth_state.user = authenticate_request()
+
+    The state is shared with sync code running in executor threads
+    and with copied contexts (for example
+    :func:`~quart.helpers.stream_with_context`), such that all of them
+    observe the same validity. When the owning context is popped — the
+    request finished or was cancelled — the state is invalidated:
+    :attr:`valid` becomes ``False`` and any attribute access raises a
+    ``RuntimeError``, denying operations that rely on stale
+    authorization.
+    """
+
+    def __init__(self) -> None:
+        self.__dict__["_valid"] = True
+        self.__dict__["_data"]: dict[str, Any] = {}
+
+    @property
+    def valid(self) -> bool:
+        """True whilst the owning context is active.
+
+        This remains readable after invalidation so that code can
+        recognize that the request has finished or been cancelled.
+        """
+        return self.__dict__["_valid"]
+
+    def invalidate(self) -> None:
+        """Mark this state as invalid, denying further access."""
+        self.__dict__["_valid"] = False
+
+    def _check_valid(self) -> None:
+        if not self.__dict__["_valid"]:
+            raise RuntimeError(
+                "This state is no longer valid, the request has"
+                " finished or been cancelled."
+            )
+
+    def __getattr__(self, name: str) -> Any:
+        self._check_valid()
+        try:
+            return self.__dict__["_data"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._check_valid()
+        self.__dict__["_data"][name] = value
+
+    def __delattr__(self, name: str) -> None:
+        self._check_valid()
+        try:
+            del self.__dict__["_data"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def __contains__(self, item: str) -> bool:
+        self._check_valid()
+        return item in self.__dict__["_data"]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """Return the value for *name*, or *default* if not set."""
+        self._check_valid()
+        return self.__dict__["_data"].get(name, default)
+
+    def __repr__(self) -> str:
+        if self.valid:
+            return f"<ContextState {self.__dict__['_data']!r}>"
+        return "<ContextState (invalid)>"
+
+
 class AppContext:
     def __init__(
         self,
@@ -47,6 +125,9 @@ class AppContext:
         self._flashes: list[tuple[str, str]] | None = None
         self._after_request_functions: list[AfterRequestCallable] = []
         self._after_websocket_functions: list[AfterWebsocketCallable] = []
+
+        self.state = ContextState()
+        self._owns_state = True
 
         try:
             self.url_adapter = app.create_url_adapter(self._request_websocket)
@@ -71,12 +152,17 @@ class AppContext:
         """Create a new context with the same data objects as this context. See
         :func:`.copy_current_request_context`.
         """
-        return self.__class__(
+        new = self.__class__(
             self.app,
             request=self._request,
             session=self._session,
             websocket=self._websocket,
         )
+        # Share the state so that it is invalidated when the owning
+        # context is popped, however this copy must not invalidate it.
+        new.state = self.state
+        new._owns_state = False
+        return new
 
     @property
     def request(self) -> Request:
@@ -229,6 +315,13 @@ class AppContext:
 
         with collect_errors:
             await self.app.do_teardown_appcontext(self, exc)
+
+        # The request has finished or been cancelled, any state bound
+        # to this context (including in threads or streams that outlive
+        # it) must now be recognized as invalid. Only the owning
+        # context invalidates, copies share but do not own the state.
+        if self._owns_state:
+            self.state.invalidate()
 
         _cv_app.reset(self._cv_token)
         self._cv_token = None

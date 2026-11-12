@@ -1,3 +1,14 @@
+## Unreleased
+
+- Add `quart.auth_state`, a `ContextState` bound to the lifetime of
+  the active context. It is shared with sync code running in
+  executor threads and with copied contexts (e.g.
+  `stream_with_context`), and is invalidated when the owning context
+  is popped — the request finished or was cancelled. After
+  invalidation `valid` is `False` and any attribute access raises
+  `RuntimeError`, so short-lived authorization results cannot be
+  used stale by late-returning threads or late-iterating streams.
+
 ## Version 0.23.1
 
 Released 2026-08-29
