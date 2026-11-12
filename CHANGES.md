@@ -2,6 +2,18 @@
 
 Released 2026-08-29
 
+## Unreleased
+
+- Add a delegation boundary for background tasks and nested scopes.
+  ``add_background_task`` accepts a ``capabilities`` grant and the new
+  ``quart.delegate`` context manager, ``require_capability``,
+  ``is_delegated``, ``current_delegation``, ``current_capabilities``,
+  ``has_capability``, ``DelegationContext`` and ``CapabilityDeniedError``
+  APIs allow protected operations to distinguish original from
+  delegated authorization. Delegated scopes can only narrow, never
+  widen, and copying the context cannot restore full identity
+  permissions.
+
 ## Version 0.23.0
 
 Released 2026-08-29

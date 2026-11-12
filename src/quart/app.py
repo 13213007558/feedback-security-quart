@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Coroutine
+from collections.abc import Iterable
 from datetime import timedelta
 from inspect import isasyncgen
 from inspect import iscoroutinefunction
@@ -54,6 +55,7 @@ from .ctx import _AppCtxGlobals
 from .ctx import AppContext
 from .ctx import has_request_context
 from .ctx import has_websocket_context
+from .delegation import delegate
 from .globals import _cv_app
 from .globals import g
 from .globals import request
@@ -1375,11 +1377,33 @@ class Quart(App):
         request.body.set_result(request_body)
         return self.request_context(request)
 
-    def add_background_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:
+    def add_background_task(
+        self,
+        func: Callable,
+        *args: Any,
+        capabilities: Iterable[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Add a background task to run alongside the app.
+
+        :param capabilities: An optional explicit subset of capabilities
+            to delegate to the task. If given the task runs within a
+            :func:`~quart.delegate` scope and can only further narrow
+            (never widen) this grant, including in any tasks it spawns
+            itself. The grant must be a subset of any currently active
+            delegation. If omitted, any currently active delegation
+            still applies unchanged.
+        """
+
         async def _wrapper() -> None:
             async with self.app_context() as ctx:
                 try:
-                    await self.ensure_async(func)(*args, **kwargs)
+                    if capabilities is None:
+                        await self.ensure_async(func)(*args, **kwargs)
+                    else:
+                        label = f"background:{getattr(func, '__name__', 'task')}"
+                        with delegate(capabilities, label=label):
+                            await self.ensure_async(func)(*args, **kwargs)
                 except Exception as error:
                     await self.handle_background_exception(ctx, error)
 

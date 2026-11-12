@@ -78,3 +78,40 @@ app context and await the function,
         async with app.app_context():
             await background_task()
         assert something_to_test
+
+Delegating capabilities to background tasks
+-------------------------------------------
+
+Background tasks often need only a fraction of the permissions held by
+the request that spawned them. An explicit delegation boundary can be
+applied via the ``capabilities`` argument, granting the task a subset
+of capabilities:
+
+.. code-block:: python
+
+    @app.route('/jobs/', methods=['POST'])
+    async def create_job():
+        app.add_background_task(background_task, capabilities={"read:reports"})
+        return 'Success'
+
+Within the task :func:`~quart.is_delegated` is true and
+:func:`~quart.require_capability` checks the grant, allowing protected
+operations to distinguish the original authorization from a delegated
+one. Outside any delegated scope the original identity authorization
+applies unchanged, including all identity reads such as ``session``.
+
+A delegated task that spawns further tasks can only narrow the grant
+further; any attempt to widen it raises
+:class:`~quart.CapabilityDeniedError` naming only the missing capabilities.
+Copying the context (for example via
+:func:`~quart.copy_current_request_context`) does not restore the full
+identity permissions.
+
+A delegation boundary can also be applied directly within a request or
+task via the :func:`~quart.delegate` context manager, which restores
+the previous scope on exit, including when the block raises:
+
+.. code-block:: python
+
+    with delegate({"read:reports"}, label="report-job"):
+        ...

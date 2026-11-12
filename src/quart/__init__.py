@@ -13,6 +13,14 @@ from .ctx import copy_current_websocket_context as copy_current_websocket_contex
 from .ctx import has_app_context as has_app_context
 from .ctx import has_request_context as has_request_context
 from .ctx import has_websocket_context as has_websocket_context
+from .delegation import CapabilityDeniedError as CapabilityDeniedError
+from .delegation import current_capabilities as current_capabilities
+from .delegation import current_delegation as current_delegation
+from .delegation import delegate as delegate
+from .delegation import DelegationContext as DelegationContext
+from .delegation import has_capability as has_capability
+from .delegation import is_delegated as is_delegated
+from .delegation import require_capability as require_capability
 from .globals import current_app as current_app
 from .globals import g as g
 from .globals import request as request
